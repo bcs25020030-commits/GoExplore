@@ -1,0 +1,76 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidUser(data) {
+      return data.uid == request.auth.uid
+        && data.email is string && data.email.size() <= 256
+        && data.name is string && data.name.size() <= 200
+        && data.role in ['user', 'admin']
+        && (data.avatar == null || (data.avatar is string && data.avatar.size() <= 1024));
+    }
+
+    match /users/{userId} {
+      allow get: if isSignedIn() && (isOwner(userId) || (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'));
+      
+      allow create: if isSignedIn() && isOwner(userId) && isValidId(userId)
+        && isValidUser(incoming())
+        && incoming().keys().hasAll(['uid', 'email', 'name', 'role', 'createdAt', 'updatedAt'])
+        && incoming().keys().size() <= 7
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      
+      allow update: if isSignedIn() && isOwner(userId) && isValidId(userId)
+        && isValidUser(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action: Update profile
+          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'avatar', 'updatedAt'])
+        );
+      
+      allow delete: if false;
+
+      match /activities/{activityId} {
+        allow list, get: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(activityId)
+          && incoming().type in ['save_destination', 'unsave_destination', 'profile_update']
+          && incoming().title is string && incoming().title.size() <= 200
+          && incoming().timestamp == request.time;
+      }
+
+      match /savedDestinations/{destId} {
+        allow list, get: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isValidId(destId)
+          && (incoming().id == null || string(incoming().id) == destId)
+          && incoming().name is string && incoming().name.size() <= 200;
+        allow delete: if isOwner(userId);
+      }
+    }
+  }
+}
